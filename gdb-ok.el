@@ -53,7 +53,7 @@
 	      (local-set-key [right] 'speedbar-expand-line)
 	      (local-set-key [left] 'speedbar-toggle-line-expansion)))
   (add-hook 'gdb-breakpoints-mode-hook
-	  (lambda() (local-set-key [?d] 'gdb-delete-breakpoint))))
+	    (lambda() (local-set-key [?d] 'gdb-delete-breakpoint))))
 
 (when gdb-insource-vars
   (add-hook 'gdb-mode-hook
@@ -73,33 +73,199 @@
   (setq speedbar-buffer nil)
   (delete-other-windows)
   (if (timerp gdb-idle-timer)
-	      (cancel-timer gdb-idle-timer))
+      (cancel-timer gdb-idle-timer))
   (setq gdb-idle-timer nil))
+
+
+(defun gdb-update-switch2()
+  (cond
+   ((eq gdb-switch2 0)
+    (gdb-set-window-buffer (gdb-get-buffer-create
+			    'gdb-breakpoints-buffer) t gdb-io-window)
+    (let ((mem (get-buffer (gdb-memory-buffer-name))))
+      (when (buffer-live-p mem)
+	(kill-buffer mem))))
+   ((eq gdb-switch2 1)
+    (gdb-set-window-buffer (gdb-get-buffer-create 'gdb-inferior-io)
+			   t gdb-io-window))
+   ((eq gdb-switch2 2)
+    (gdb-set-window-buffer (gdb-get-buffer-create
+			    'gdb-memory-buffer) t gdb-io-window))))
+(defun gdb-switch2()
+  (interactive)
+  (setq gdb-switch2 (1+ gdb-switch2))
+  (when (> gdb-switch2 2)
+    (setq gdb-switch2 0))
+  (gdb-update-switch2))
+
+(defun gdb-switch()
+  (interactive)
+  (if gdb-notasm
+      (let ((speedbar-window (get-buffer-window speedbar-buffer)))
+	(setq gdb-regs-window (split-window speedbar-window (/ ( * (window-width speedbar-window) 2) 3) 'right))
+	(gdb-set-window-buffer (gdb-get-buffer-create 'gdb-registers-buffer)  t gdb-regs-window)
+	(set-window-buffer gdb-source-window
+			   (gdb-get-buffer-create 'gdb-disassembly-buffer))
+	(setq gdb-notasm nil)
+	(message "asm enabled"))
+    (when gud-last-frame
+      (setq gud-last-last-frame gud-last-frame))
+    (if gud-last-last-frame
+	(let ((active_file (gud-find-file (car gud-last-last-frame))))
+	  (if active_file
+	      (progn
+		(delete-window gdb-regs-window)
+		(set-window-buffer gdb-source-window active_file)
+
+		(kill-buffer (get-buffer (gdb-registers-buffer-name)))
+		(kill-buffer (get-buffer (gdb-disassembly-buffer-name)))
+
+		(setq gdb-notasm t)
+		(gud-display-frame)
+		(gdb-place-breakpoints)
+		(speedbar-update-contents)
+		(message "asm disabled"))
+	    (message "Cannot find source file for this location")))
+      (message "Cannot find bounds of this location"))))
+
+;; custom
+(defun gdb-go(step reverse)
+  (let ((command
+	 (concat "-exec-"
+		 (if step "step" "next")
+		 (if (not gdb-notasm)
+		     "-instruction" "")
+		 (if reverse
+		     " --reverse" ""))))
+    (gdb-gud-context-call command "%p" 1 t)))
+
+;; custom
+(defun gdb-var-clear()
+  (interactive)
+  (dolist (varchild gdb-var-list)
+    (let ((root (car varchild)))
+      (if (not (string-match "\\." root))
+	  (gdb-input (concat "-var-delete " root) 'ignore))))
+  (setq gdb-var-list '())
+  (speedbar-update-contents))
+
+;; custom
+(defun gdb-toggle-break()
+  "Add/toggle breakpoint"
+  (interactive)
+  (if (not (equal gdb-source-window (selected-window)))
+      (select-window gdb-source-window))
+  (save-restriction
+    (widen)
+    (save-excursion
+      (beginning-of-line)
+      (let* ((line (number-to-string (1+ (count-lines 1 (point)))))
+	     (addr (if gdb-notasm (buffer-name) (current-word)))
+	     (location (concat addr ":" line))
+	     (cmd))
+	(dolist (bp gdb-breakpoints-list)
+	  (when (or (and (equal line (bindat-get-field bp 'line))
+			 (string-suffix-p addr (bindat-get-field bp 'file)))
+		    (equal addr (bindat-get-field bp 'addr))
+		    (equal location (bindat-get-field bp 'original-location)))
+	    (when (not cmd)
+	      (setq cmd (if (equal "y"
+				   (bindat-get-field bp 'enabled))
+			    "-break-disable " "-break-enable ")))
+	    (gud-basic-call
+	     (concat cmd (bindat-get-field bp 'number)))))
+	(when (not cmd)
+	  (gud-call (concat "break " (if gdb-notasm location (concat "*" addr)))))))))
+
+(defun gdb-edit-value (_text _token _indent)
+  "Assign a value to a variable displayed in the speedbar."
+  (let* ((var (nth (- (count-lines (point-min) (point)) 2) gdb-var-list))
+	 (varnum (car var))
+	 (value (read-string "New value: ")))
+    (gdb-input (concat "-var-assign " varnum " " value)
+	       `(lambda () (gdb-edit-value-handler ,varnum, "")))))
+
+(defun gdb-edit-value-handler (value format)
+  (let* ((res (gdb-json-partial-output))
+	 (err-msg (bindat-get-field res 'msg))
+	 (nval (bindat-get-field res 'value)))
+    (if err-msg (message (replace-regexp-in-string
+			  "\-var\-assign\: " "" err-msg))
+      (let ((changed (catch 'found
+		       (dolist (v gdb-var-list)
+			 (if (string-equal (car v) value)
+			     (throw 'found v)))
+		       nil)))
+	(when changed
+	  (if (not (equal format "binary"))
+	      (setcar (nthcdr 4 changed) nval)
+	    (setcar (nthcdr 4 changed) (concat "0b" nval)))
+	  (speedbar-update-contents))))))
+
+(defun gdb-show-format-handler (varnum)
+  (let* ((output (gdb-json-partial-output))
+	 (format (bindat-get-field output 'format))
+	 (pos (cl-position format gdb-formats :test #'equal)))
+    (if pos
+	(setq pos (1+ pos))
+      (setq pos 1))
+    (while (= pos (length gdb-formats))
+      (setq pos 0))
+
+    (let ((newfmt (nth pos gdb-formats)))
+      (dframe-message "Format changed to %s" newfmt)
+      (gdb-input (concat "-var-set-format " varnum " " newfmt)
+		 `(lambda () (gdb-edit-value-handler, varnum, newfmt))))))
+
+(defun gdb-switch-format()
+  (interactive)
+  (let* ((var (nth (- (count-lines (point-min) (point)) 2) gdb-var-list))
+	 (varnum (car var)))
+    (gdb-input (concat "-var-show-format " varnum)
+	       `(lambda () (gdb-show-format-handler, varnum)))))
+
+(defun gdb-idle-handler()
+  (when (equal gdb-source-window (selected-window))
+    (let ((sym (thing-at-point 'symbol)))
+      (when sym
+	(gdb-input (concat "-var-create temp_var * " sym)
+		   `(lambda () (gdb-var-temp-handler, sym)))))))
+
+(defun gdb-var-temp-handler(expr)
+  (let* ((result (gdb-json-partial-output)))
+    (when (not (bindat-get-field result 'msg))
+      (let ((type (bindat-get-field result 'type)))
+	(put-text-property
+	 0 (length expr) 'face font-lock-variable-name-face expr)
+	(put-text-property
+	 0 (length type) 'face font-lock-type-face type)
+	(dframe-message "%s %s = %s" type expr
+			(bindat-get-field result 'value))
+	(gdb-input "-var-delete temp_var" 'ignore)))))
+
+
+;;custom function
+(defun vars-handler ()
+  (let ((locals-list (bindat-get-field
+		      (gdb-json-partial-output) 'variables)))
+    (dolist (var locals-list)
+      (let ((name (bindat-get-field var 'name)))
+	(when (catch 'found
+		(dolist (v gdb-var-list)
+		  (while (string-equal (nth 1 v) name)
+		    (if (string-equal (nth 7 v ) gdb-selected-frame)
+			(throw 'found nil)
+		      (progn
+			(gdb-var-delete-1 v (car v))
+			(throw 'found t)))))
+		t)
+	  (gdb-input (concat "-var-create - * " name)
+		     `(lambda () (gdb-var-create-handler ,name, t)))))))
+  (gdb-input "-var-update --all-values *"
+	     'gdb-var-update-handler 'gdb-var-update))
 
 (eval-after-load "gdb-mi"
   '(progn
-     (defun gdb-show-format-handler (varnum)
-       (let* ((output (gdb-json-partial-output))
-	      (format (bindat-get-field output 'format))
-	      (pos (cl-position format gdb-formats :test #'equal)))
-	 (if pos
-	     (setq pos (1+ pos))
-	   (setq pos 1))
-	 (while (= pos (length gdb-formats))
-	   (setq pos 0))
-
-	 (let ((newfmt (nth pos gdb-formats)))
-	   (dframe-message "Format changed to %s" newfmt)
-	   (gdb-input (concat "-var-set-format " varnum " " newfmt)
-		      `(lambda () (gdb-edit-value-handler, varnum, newfmt))))))
-
-     (defun gdb-switch-format()
-       (interactive)
-       (let* ((var (nth (- (count-lines (point-min) (point)) 2) gdb-var-list))
-	      (varnum (car var)))
-	 (gdb-input (concat "-var-show-format " varnum)
-		    `(lambda () (gdb-show-format-handler, varnum)))))
-
      (defun gdb-var-create-handler (expr &optional noupd)
        (let* ((result (gdb-json-partial-output)))
 	 (if (not (bindat-get-field result 'msg))
@@ -120,99 +286,12 @@
 		 (speedbar-update-contents)))
 	   (message-box "No symbol \"%s\" in current context." expr))))
 
-     (defun gdb-idle-handler()
-       (when (equal gdb-source-window (selected-window))
-	 (let ((sym (thing-at-point 'symbol)))
-	   (when sym
-	     (gdb-input (concat "-var-create temp_var * " sym)
-			`(lambda () (gdb-var-temp-handler, sym)))))))
-
-     (defun gdb-var-temp-handler(expr)
-       (let* ((result (gdb-json-partial-output)))
-	 (when (not (bindat-get-field result 'msg))
-	   (let ((type (bindat-get-field result 'type)))
-	     (put-text-property
-	      0 (length expr) 'face font-lock-variable-name-face expr)
-	     (put-text-property
-	      0 (length type) 'face font-lock-type-face type)
-	     (dframe-message "%s %s = %s" type expr
-			     (bindat-get-field result 'value))
-	     (gdb-input "-var-delete temp_var" 'ignore)))))
-
-     ;; custom
-     (defun gdb-go(step reverse)
-       (let ((command
-	      (concat "-exec-"
-		      (if step "step" "next")
-		      (if (not gdb-notasm)
-			  "-instruction" "")
-		      (if reverse
-			  " --reverse" ""))))
-	 (gdb-gud-context-call command "%p" 1 t)))
-
-     ;; custom
-     (defun gdb-var-clear()
-       (interactive)
-       (dolist (varchild gdb-var-list)
-	 (let ((root (car varchild)))
-	   (if (not (string-match "\\." root))
-	       (gdb-input (concat "-var-delete " root) 'ignore))))
-       (setq gdb-var-list '())
-       (speedbar-update-contents))
-
-     ;; custom
-     (defun gdb-toggle-break()
-       "Add/toggle breakpoint"
-       (interactive)
-       (if (not (equal gdb-source-window (selected-window)))
-	   (select-window gdb-source-window))
-       (save-restriction
-	 (widen)
-	 (save-excursion
-	   (beginning-of-line)
-	   (let* ((line (number-to-string (1+ (count-lines 1 (point)))))
-		  (addr (if gdb-notasm (buffer-name) (current-word)))
-		  (location (concat addr ":" line))
-		  (cmd))
-	     (dolist (bp gdb-breakpoints-list)
-	       (when (or (and (equal line (bindat-get-field bp 'line))
-			      (string-suffix-p addr (bindat-get-field bp 'file)))
-			 (equal addr (bindat-get-field bp 'addr))
-			 (equal location (bindat-get-field bp 'original-location)))
-		 (when (not cmd)
-		   (setq cmd (if (equal "y"
-					(bindat-get-field bp 'enabled))
-				 "-break-disable " "-break-enable ")))
-		 (gud-basic-call
-		  (concat cmd (bindat-get-field bp 'number)))))
-	     (when (not cmd)
-	       (gud-call (concat "break " (if gdb-notasm location (concat "*" addr)))))))))
 
      (defun gud-speedbar-item-info ()
        (let ((var (nth (- (line-number-at-pos (point)) 2) gdb-var-list)))
 	 (when (nth 3 var)
 	   (dframe-message  "%s [%s]" (nth 4 var) (nth 3 var)))))
 
-
-     ;;custom function
-     (defun vars-handler ()
-       (let ((locals-list (bindat-get-field
-			   (gdb-json-partial-output) 'variables)))
-	 (dolist (var locals-list)
-	   (let ((name (bindat-get-field var 'name)))
-	     (when (catch 'found
-		     (dolist (v gdb-var-list)
-		       (while (string-equal (nth 1 v) name)
-			 (if (string-equal (nth 7 v ) gdb-selected-frame)
-			     (throw 'found nil)
-			   (progn
-			     (gdb-var-delete-1 v (car v))
-			     (throw 'found t)))))
-		     t)
-	       (gdb-input (concat "-var-create - * " name)
-			  `(lambda () (gdb-var-create-handler ,name, t)))))))
-       (gdb-input "-var-update --all-values *"
-		  'gdb-var-update-handler 'gdb-var-update))
 
      ;; remove buggy update
      (defun gdb-var-list-children (varnum)
@@ -229,86 +308,9 @@
        (with-current-buffer (gdb-get-buffer-create 'gdb-inferior-io)
 	 (comint-output-filter proc string)))
 
-     (defun gdb-edit-value (_text _token _indent)
-       "Assign a value to a variable displayed in the speedbar."
-       (let* ((var (nth (- (count-lines (point-min) (point)) 2) gdb-var-list))
-	      (varnum (car var))
-	      (value (read-string "New value: ")))
-	 (gdb-input (concat "-var-assign " varnum " " value)
-		    `(lambda () (gdb-edit-value-handler ,varnum, "")))))
-
-     (defun gdb-edit-value-handler (value format)
-       (let* ((res (gdb-json-partial-output))
-	      (err-msg (bindat-get-field res 'msg))
-	      (nval (bindat-get-field res 'value)))
-	 (if err-msg (message (replace-regexp-in-string
-			       "\-var\-assign\: " "" err-msg))
-	   (let ((changed (catch 'found
-			    (dolist (v gdb-var-list)
-			      (if (string-equal (car v) value)
-				  (throw 'found v)))
-			    nil)))
-	     (when changed
-	       (if (not (equal format "binary"))
-		   (setcar (nthcdr 4 changed) nval)
-		 (setcar (nthcdr 4 changed) (concat "0b" nval)))
-	       (speedbar-update-contents))))))
-
      (defun gdb-var-update ()
        (gdb-input "-stack-list-variables --skip-unavailable --no-values"
 		  'vars-handler))
-
-     (defun update_sw2()
-       (cond
-	((eq gdb-switch2 0)
-	 (gdb-set-window-buffer (gdb-get-buffer-create
-				 'gdb-breakpoints-buffer) t gdb-io-window)
-	 (let ((mem (get-buffer (gdb-memory-buffer-name))))
-	   (when (buffer-live-p mem)
-	     (kill-buffer mem))))
-	((eq gdb-switch2 1)
-	 (gdb-set-window-buffer (gdb-get-buffer-create 'gdb-inferior-io)
-				t gdb-io-window))
-	((eq gdb-switch2 2)
-	 (gdb-set-window-buffer (gdb-get-buffer-create
-				 'gdb-memory-buffer) t gdb-io-window))))
-     (defun gdb-switch2()
-       (interactive)
-       (setq gdb-switch2 (1+ gdb-switch2))
-       (when (> gdb-switch2 2)
-	 (setq gdb-switch2 0))
-       (update_sw2))
-
-     (defun gdb-switch()
-       (interactive)
-       (if gdb-notasm
-	   (let ((speedbar-window (get-buffer-window speedbar-buffer)))
-	     (setq gdb-regs-window (split-window speedbar-window (/ ( * (window-width speedbar-window) 2) 3) 'right))
-	     (gdb-set-window-buffer (gdb-get-buffer-create 'gdb-registers-buffer)  t gdb-regs-window)
-	     (set-window-buffer gdb-source-window
-				(gdb-get-buffer-create 'gdb-disassembly-buffer))
-	     (setq gdb-notasm nil)
-	     (message "asm enabled"))
-	 (when gud-last-frame
-	   (setq gud-last-last-frame gud-last-frame))
-	 (if gud-last-last-frame
-	     (let ((active_file (gud-find-file (car gud-last-last-frame))))
-	       (if active_file
-		   (progn
-		     (delete-window gdb-regs-window)
-		     (set-window-buffer gdb-source-window active_file)
-
-		     (kill-buffer (get-buffer (gdb-registers-buffer-name)))
-		     (kill-buffer (get-buffer (gdb-disassembly-buffer-name)))
-
-		     (setq gdb-notasm t)
-		     (gud-display-frame)
-		     (gdb-place-breakpoints)
-		     (speedbar-update-contents)
-		     (message "asm disabled"))
-		 (message "Cannot find source file for this location")))
-	   (message "Cannot find bounds of this location"))))
-
 
      (defun gud-find-file (file)
        ;; Don't get confused by double slashes in the name that comes from GDB.
@@ -333,6 +335,7 @@
 	     (make-local-variable 'gud-keep-buffer))
 	   buf)))
 
+     ;; window layout
      (defun gdb-setup-windows ()
        (set-window-dedicated-p (selected-window) nil)
        (switch-to-buffer gud-comint-buffer)
@@ -354,7 +357,7 @@
 	 (let ((win4 (split-window-right)))
 	   (select-window win4)
 	   (setq gdb-io-window  win4))
-	 (update_sw2)
+	 (gdb-update-switch2)
 	 (select-window win2)
 	 (setq speedbar-buffer (get-buffer-create "GUD")
 	       speedbar-frame (selected-frame)
