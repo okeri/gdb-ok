@@ -23,7 +23,7 @@
 ;; variables. feel free to edit
 (defvar gdb-notasm t "Layout switch (source/asm)")
 (defvar gdb-switch2 0 "Layout switch (breakpoints/io/memory)")
-(defvar gdb-insource-vars nil
+(defvar gdb-insource-vars t
   "Set to t if you want show variables values under cursor")
 (defvar gdb-speedbar-def-simple-keys t "t if define simple keys")
 
@@ -169,13 +169,13 @@
 			 (string-suffix-p addr (bindat-get-field bp 'file)))
 		    (equal addr (bindat-get-field bp 'addr))
 		    (equal location (bindat-get-field bp 'original-location)))
-	    (when (not cmd)
+	    (unless cmd
 	      (setq cmd (if (equal "y"
 				   (bindat-get-field bp 'enabled))
 			    "-break-disable " "-break-enable ")))
 	    (gud-basic-call
 	     (concat cmd (bindat-get-field bp 'number)))))
-	(when (not cmd)
+	(unless cmd
 	  (gud-call (concat "break " (if gdb-notasm location (concat "*" addr)))))))))
 
 (defun gdb-edit-value (_text _token _indent)
@@ -234,7 +234,7 @@
 
 (defun gdb-var-temp-handler(expr)
   (let* ((result (gdb-json-partial-output)))
-    (when (not (bindat-get-field result 'msg))
+    (unless (bindat-get-field result 'msg)
       (let ((type (bindat-get-field result 'type)))
 	(put-text-property
 	 0 (length expr) 'face font-lock-variable-name-face expr)
@@ -283,9 +283,9 @@
 	       (unless (string-equal
 			speedbar-initial-expansion-list-name "GUD")
 		 (speedbar-change-initial-expansion-list "GUD"))
-	       (when (not noupd)
+	       (unless noupd
 		 (speedbar-update-contents)))
-	   (message-box "No symbol \"%s\" in current context." expr))))
+	   (dframe-message "No symbol \"%s\" in current context." expr))))
 
 
      (defun gud-speedbar-item-info ()
@@ -367,7 +367,7 @@
 	 (speedbar-mode)
 	 (speedbar-change-initial-expansion-list "GUD")
 	 (gdb-set-window-buffer speedbar-buffer t win2)
-	 (when (not gdb-notasm)
+	 (unless gdb-notasm
 	   (setq gdb-regs-window
 		 (split-window win2 (/ ( * (window-width win2) 2) 3) 'right))
 	   (gdb-set-window-buffer (gdb-get-buffer-create 'gdb-registers-buffer)  t gdb-regs-window))
@@ -407,8 +407,8 @@
 	 (gud-set-buffer)
 	 (when gdb-notasm
 	   (gud-display-line (car gud-last-frame) (cdr gud-last-frame))
-	   (when (not (pos-visible-in-window-p gud-overlay-arrow-position
-					       gdb-source-window))
+	   (unless (pos-visible-in-window-p gud-overlay-arrow-position
+					       gdb-source-window)
 	     (set-window-start gdb-source-window gud-overlay-arrow-position))
 	   (setq gud-last-last-frame gud-last-frame
 		 gud-last-frame nil))))
@@ -433,7 +433,7 @@
 			    (setcar (nthcdr 5 var) 'out-of-scope)))
 			 ((string-equal scope "true")
 			  (setcar (nthcdr 6 var) has-more)
-			  (when (not (equal (nth 4 var) value))
+			  (unless (equal (nth 4 var) value)
 			    (setcar (nthcdr 4 var) value)
 			    (setcar (nthcdr 5 var) 'changed)))
 			 ((string-equal scope "invalid")
