@@ -521,7 +521,7 @@
 	   (gdb-resync)
 	   (unless (assoc bptno gdb-location-alist)
 	     (push (cons bptno "File not found") gdb-location-alist)
-	     (message-box "Cannot find source file for breakpoint location.
+	     (dframe-message "Cannot find source file for breakpoint location.
 Add directory to search path for source files using the GDB command, dir."))
 	   (throw 'file-not-found nil))
 	 (with-current-buffer (find-file-noselect (match-string 1) t)
