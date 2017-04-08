@@ -101,16 +101,20 @@
 
 (defun gdb-switch()
   (interactive)
+  (when gud-last-frame
+    (setq gud-last-last-frame gud-last-frame))
   (if gdb-notasm
       (let ((speedbar-window (get-buffer-window speedbar-buffer)))
 	(setq gdb-regs-window (split-window speedbar-window (/ ( * (window-width speedbar-window) 2) 3) 'right))
-	(gdb-set-window-buffer (gdb-get-buffer-create 'gdb-registers-buffer)  t gdb-regs-window)
 	(set-window-buffer gdb-source-window
 			   (gdb-get-buffer-create 'gdb-disassembly-buffer))
+;; TODO: fix below
+;;	(gdb-set-window-buffer
+;;	 (gdb-get-buffer-create 'gdb-registers-buffer gdb-thread-number) t gdb-regs-window)
+
 	(setq gdb-notasm nil)
 	(message "asm enabled"))
-    (when gud-last-frame
-      (setq gud-last-last-frame gud-last-frame))
+
     (if gud-last-last-frame
 	(let ((active_file (gud-find-file (car gud-last-last-frame))))
 	  (if active_file
@@ -118,7 +122,7 @@
 		(delete-window gdb-regs-window)
 		(set-window-buffer gdb-source-window active_file)
 
-		(kill-buffer (get-buffer (gdb-registers-buffer-name)))
+		;; (kill-buffer (get-buffer (gdb-registers-buffer-name)))
 		(kill-buffer (get-buffer (gdb-disassembly-buffer-name)))
 
 		(setq gdb-notasm t)
@@ -370,7 +374,8 @@
 	 (unless gdb-notasm
 	   (setq gdb-regs-window
 		 (split-window win2 (/ ( * (window-width win2) 2) 3) 'right))
-	   (gdb-set-window-buffer (gdb-get-buffer-create 'gdb-registers-buffer)  t gdb-regs-window))
+	   (gdb-set-window-buffer (gdb-get-buffer-create 'gdb-registers-buffer)
+				  t gdb-regs-window))
 	 (buffer-disable-undo speedbar-buffer)
 	 (select-window win0)
 	 (set-window-dedicated-p win0 t)))
